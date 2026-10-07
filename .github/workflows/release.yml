@@ -1,0 +1,48 @@
+name: Release
+
+# 推送 v* 格式的 tag 时自动构建并发布 Release（附双架构 app 安装包）
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build universal app (x86_64 + arm64)
+        run: |
+          APP="GitLabPipelineMonitor.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp Info.plist "$APP/Contents/Info.plist"
+          cp AppIcon.icns "$APP/Contents/Resources/"
+          swiftc -swift-version 5 -O -target x86_64-apple-macos12.0 -o "$APP/Contents/MacOS/GitLabPipelineMonitor" main.swift
+          swiftc -swift-version 5 -O -target arm64-apple-macos12.0 -o "$APP/Contents/MacOS/GitLabPipelineMonitor.arm64" main.swift
+          lipo -create "$APP/Contents/MacOS/GitLabPipelineMonitor" "$APP/Contents/MacOS/GitLabPipelineMonitor.arm64" -output "$APP/Contents/MacOS/GitLabPipelineMonitor"
+          rm "$APP/Contents/MacOS/GitLabPipelineMonitor.arm64"
+          # 未签名的应用 macOS 会静默忽略其通知，ad-hoc 签名这步不能省
+          codesign --force --sign - "$APP"
+          lipo -info "$APP/Contents/MacOS/GitLabPipelineMonitor"
+
+      - name: Package
+        run: |
+          # 清掉扩展属性，避免 zip 里出现 __MACOSX 垃圾目录
+          xattr -cr GitLabPipelineMonitor.app
+          VERSION="${GITHUB_REF_NAME#v}"
+          ditto -c -k --keepParent GitLabPipelineMonitor.app "GitLabPipelineMonitor-${VERSION}.zip"
+          unzip -l "GitLabPipelineMonitor-${VERSION}.zip"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ZIP="GitLabPipelineMonitor-${GITHUB_REF_NAME#v}.zip"
+          gh release create "$GITHUB_REF_NAME" "$ZIP" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          gh release view "$GITHUB_REF_NAME"
