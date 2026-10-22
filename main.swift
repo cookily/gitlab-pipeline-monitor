@@ -186,7 +186,7 @@ func pipelineTimeText(_ st: RepoState) -> String? {
     }
 }
 
-enum DotStyle { case filled, dashed, paused, warning }
+enum DotStyle { case filled, dashed, failed, paused, warning }
 
 // MARK: - 主逻辑
 
@@ -443,48 +443,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     // MARK: 菜单栏图标
-    // 直接把颜色画进图片（isTemplate=false）：contentTintColor 对 NSStatusItem 按钮在部分系统上不生效，
+    // 用 SF Symbols 画状态图标（checkmark.circle.fill / xmark.circle.fill 等），
+    // 颜色直接合成进图片：contentTintColor 对 NSStatusItem 按钮在部分系统上不生效，
     // 深色菜单栏下会渲染成黑色看不清
+    private func symbolImage(_ name: String, color: NSColor) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else { return nil }
+        let size = base.size
+        let img = NSImage(size: size)
+        img.lockFocus()
+        base.draw(in: NSRect(origin: .zero, size: size))
+        color.set()
+        NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
+        img.unlockFocus()
+        img.isTemplate = false
+        return img
+    }
 
     private func dotImage(_ color: NSColor, style: DotStyle) -> NSImage {
+        let symbol: String
+        switch style {
+        case .filled:  symbol = "checkmark.circle.fill"
+        case .dashed:  symbol = "arrow.triangle.2.circlepath"
+        case .failed:  symbol = "xmark.circle.fill"
+        case .paused:  symbol = "pause.circle.fill"
+        case .warning: symbol = "exclamationmark.triangle.fill"
+        }
+        if let img = symbolImage(symbol, color: color) { return img }
+        // SF Symbol 不可用时退化为纯色圆
         let side: CGFloat = 18
         let img = NSImage(size: NSSize(width: side, height: side))
         img.lockFocus()
-        let mid = side / 2
         color.set()
-        switch style {
-        case .filled:
-            NSBezierPath(ovalIn: NSRect(x: mid - 5.5, y: mid - 5.5, width: 11, height: 11)).fill()
-        case .dashed:
-            let ring = NSBezierPath(ovalIn: NSRect(x: mid - 5.5, y: mid - 5.5, width: 11, height: 11))
-            ring.lineWidth = 2
-            ring.setLineDash([2.2, 2.0], count: 2, phase: 0)
-            ring.stroke()
-        case .paused:
-            let bars = NSBezierPath()
-            bars.lineWidth = 2.6
-            bars.lineCapStyle = .round
-            bars.move(to: NSPoint(x: mid - 2.6, y: mid - 4.5)); bars.line(to: NSPoint(x: mid - 2.6, y: mid + 4.5))
-            bars.move(to: NSPoint(x: mid + 2.6, y: mid - 4.5)); bars.line(to: NSPoint(x: mid + 2.6, y: mid + 4.5))
-            bars.stroke()
-        case .warning:
-            let w: CGFloat = 14, h: CGFloat = 12.5
-            let x0 = mid - w / 2, y0 = mid - h / 2 - 0.5
-            let triangle = NSBezierPath()
-            triangle.move(to: NSPoint(x: x0, y: y0))
-            triangle.line(to: NSPoint(x: x0 + w, y: y0))
-            triangle.line(to: NSPoint(x: mid, y: y0 + h))
-            triangle.close()
-            triangle.lineWidth = 1.8
-            triangle.lineJoinStyle = .round
-            triangle.stroke()
-            let bar = NSBezierPath()
-            bar.lineWidth = 1.8
-            bar.lineCapStyle = .round
-            bar.move(to: NSPoint(x: mid, y: y0 + 3.6)); bar.line(to: NSPoint(x: mid, y: y0 + 7.0))
-            bar.stroke()
-            NSBezierPath(ovalIn: NSRect(x: mid - 0.9, y: y0 + 1.2, width: 1.8, height: 1.8)).fill()
-        }
+        NSBezierPath(ovalIn: NSRect(x: side / 2 - 5.5, y: side / 2 - 5.5, width: 11, height: 11)).fill()
         img.unlockFocus()
         img.isTemplate = false
         return img
@@ -493,11 +485,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func updateIcon() {
         guard let button = statusItem.button else { return }
         var color = NSColor.systemGray
-        var style = DotStyle.filled
+        var style = DotStyle.dashed
         if config == nil || config!.token.isEmpty {
             color = .systemOrange; style = .warning
         } else if states.contains(where: { $0.effectiveStatus == "failed" }) {
-            color = .systemRed; style = .filled
+            color = .systemRed; style = .failed
         } else if states.contains(where: { ["running", "pending", "created"].contains($0.effectiveStatus ?? "") }) {
             color = .systemOrange; style = .dashed
         } else if states.contains(where: { $0.error != nil }) {
