@@ -73,6 +73,36 @@ Create `~/.config/gitlab-pipeline-monitor/config.json`（菜单里点「打开�
 | `repos[].project` | Project path (`group/project`) or numeric id（项目路径或数字 ID） |
 | `repos[].ref` | Branch to watch（要监控的分支） |
 | `repos[].alias` | Display name in the menu, optional（菜单显示名，可省略） |
+| `repos[].jobs` | Optional whitelist of job names (exact match). When set, only these jobs decide the status — useful when a repo has unrelated jobs (e.g. a mobile test) that fail without affecting your deploy（可选：只看这些 job，**精确名字匹配**） |
+
+### Watching a single job / 只关心某个 job
+
+Many pipelines run several jobs; a failing unrelated job (mobile build, optional scan) turns the
+whole pipeline red even though `build-job` passed. Add `jobs` to watch only what matters:
+
+```json
+{ "project": "my-group/backend", "ref": "main", "alias": "Backend", "jobs": ["build-job"] }
+```
+
+Matching is **exact** — `build-job` will not match `build-job-mobile-test`. The repo is green only
+when every whitelisted job ends `success` (or `skipped`); `manual` jobs show as "waiting for manual
+action" rather than success. Extra jobs are ignored entirely.
+
+流水线里常有多个 job，一个无关 job（移动端构建、可选的扫描）失败会让整条流水线变红，哪怕
+`build-job` 已经成功。加 `jobs` 字段只盯你关心的：**精确匹配**（`build-job` 不会命中
+`build-job-mobile-test`），白名单里的 job 全部 `success`/`skipped` 才算绿，`manual` 单独显示
+"待手动"，其余 job 完全忽略。
+
+### Menu details / 菜单信息
+
+Each row shows status, branch, **finish time** (relative within 24 h, absolute after), the trigger
+source (push / manual / schedule / API) and **who triggered it**; running pipelines show elapsed
+time instead. The refresh timestamp sits in the menu header. Trigger user is fetched once per
+pipeline and cached, so polling cost stays at one request per repo per interval.
+
+每行显示状态、分支、**完成时间**（24 小时内相对、更早显示绝对时间）、触发方式（推送/手动/定时/API）
+与**触发人**；进行中的流水线显示"已跑多久"。刷新时间放在菜单标题。触发人每个流水线只查一次并
+缓存，轮询开销仍为每仓库每轮一个请求。
 
 The token is stored only in this local file (outside any git repo) and is sent exclusively to
 your own GitLab instance. Keep the file's `600` permissions.
