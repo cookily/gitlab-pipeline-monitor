@@ -203,6 +203,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var activityToken: NSObjectProtocol?
     private var paused = false
     private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
+    // 专用会话：网络切换（VPN 断开重拨）后旧连接池/缓存会失效，检测到网络错误时整体重建
+    private var session: URLSession = AppDelegate.makeSession()
+    private var consecutiveNetworkErrors = 0
+
+    private static func makeSession() -> URLSession {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 15
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }
 
     static let defaultConfigJSON = """
     {
@@ -255,7 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self.pollInFlight = false
             self.updateIcon()
             guard !self.paused else { return }  // 暂停时不排下一轮
-            let interval = TimeInterval(max(15, self.config?.intervalSeconds ?? 60))
+            var interval = TimeInterval(max(15, self.config?.intervalSeconds ?? 60))
+            // 网络异常时更快重试（VPN 重连后尽快恢复），最多退到常规间隔
+            if self.consecutiveNetworkErrors > 0 {
+                interval = min(interval, TimeInterval(15))
+            }
             self.timer?.invalidate()
             self.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
                 self?.poll()
@@ -309,11 +324,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         request.timeoutInterval = 20
         request.setValue(cfg.token, forHTTPHeaderField: "PRIVATE-TOKEN")
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { done(); return }
                 if let error = error {
-                    st.error = error.localizedDescription
+                    let ns = error as NSError
+                    let isNetwork = ns.domain == NSURLErrorDomain
+                        && [NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost,
+                            NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost,
+                            NSURLErrorTimedOut, NSURLErrorDNSLookupFailed,
+                            NSURLErrorSecureConnectionFailed].contains(ns.code)
+                    if isNetwork {
+                        st.error = "网络不可用"
+                        self.consecutiveNetworkErrors += 1
+                        // 首次失败即重建会话：VPN 断开重拨后旧连接池绑在失效接口上，不重建会一直失败
+                        if self.consecutiveNetworkErrors == 1 {
+                            self.session.invalidateAndCancel()
+                            self.session = AppDelegate.makeSession()
+                        }
+                    } else {
+                        st.error = error.localizedDescription
+                    }
                 } else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                     var msg = "HTTP \(http.statusCode)"
                     if http.statusCode == 401 { msg += "（token 无效或过期）" }
@@ -323,6 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 } else if let data = data,
                           let list = try? JSONDecoder().decode([Pipeline].self, from: data) {
                     st.error = nil
+                    self.consecutiveNetworkErrors = 0
                     st.fetchedAt = Date()
                     st.pipeline = list.first
                     // 触发人不在列表接口里，取详情接口；每个流水线只查一次并缓存
@@ -382,7 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue(token, forHTTPHeaderField: "PRIVATE-TOKEN")
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        session.dataTask(with: request) { data, _, _ in
             DispatchQueue.main.async {
                 if let data = data,
                    let jobs = try? JSONDecoder().decode([Job].self, from: data) {
@@ -400,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue(token, forHTTPHeaderField: "PRIVATE-TOKEN")
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        session.dataTask(with: request) { data, _, _ in
             DispatchQueue.main.async {
                 guard let data = data,
                       let detail = try? JSONDecoder().decode(PipelineDetail.self, from: data) else { return }
@@ -520,9 +552,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let latest = states.compactMap({ $0.fetchedAt }).max() {
             headerTitle += "（\(latest.relativeText())刷新）"
         }
+        let networkDown = states.contains(where: { $0.error == "网络不可用" })
+        if networkDown {
+            headerTitle += " · ⚠️ 网络不可用，正在重试"
+        }
         let header = NSMenuItem(title: headerTitle, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
+        if networkDown {
+            let hint = NSMenuItem(title: "　（VPN 重连后会自动恢复，无需操作）", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
+        }
 
         if config == nil {
             let warn = NSMenuItem(title: "⚠️ 读不到配置文件，点此打开", action: #selector(openConfigFile), keyEquivalent: "")
@@ -544,7 +585,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             if let watched = st.cfg.jobs, !watched.isEmpty {
                 label += " · 只看" + watched.joined(separator: "/")
             }
-            if let err = st.error { label += "（\(err)）" }
+            if let err = st.error, err != "网络不可用" { label += "（\(err)）" }
+            else if st.error == "网络不可用" { label += " · 数据可能过期" }
             let item = NSMenuItem(title: label, action: #selector(openLink(_:)), keyEquivalent: "")
             item.target = self
             if let web = st.pipeline?.webUrl {
