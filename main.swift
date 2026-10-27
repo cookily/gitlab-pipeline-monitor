@@ -206,13 +206,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // 专用会话：网络切换（VPN 断开重拨）后旧连接池/缓存会失效，检测到网络错误时整体重建
     private var session: URLSession = AppDelegate.makeSession()
     private var consecutiveNetworkErrors = 0
+    private var lastProxySignature: String = AppDelegate.proxySignature()
 
     private static func makeSession() -> URLSession {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 15
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // URLSessionConfiguration 创建时会快照系统代理设置；VPN/代理重连后旧快照会指向
+        // 已关闭的端口，必须显式重新读取当前系统代理，否则重建会话也救不回来
+        if let proxies = systemProxySettings() {
+            cfg.connectionProxyDictionary = proxies
+        }
         return URLSession(configuration: cfg)
+    }
+
+    // 系统代理配置指纹：VPN/代理软件重连会改变它，是"网络环境已变化"的可靠信号
+    private static func proxySignature() -> String {
+        guard let proxies = systemProxySettings() else { return "none" }
+        return proxies.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ",")
+    }
+
+    // 读取当前系统（含 SOCKS/HTTP/HTTPS）代理配置，供新建会话使用
+    private static func systemProxySettings() -> [AnyHashable: Any]? {
+        guard let unmanaged = CFNetworkCopySystemProxySettings() else { return nil }
+        let dict = unmanaged.takeRetainedValue() as NSDictionary
+        var out: [AnyHashable: Any] = [:]
+        if let httpEnable = dict["HTTPEnable"] as? Int, httpEnable == 1,
+           let host = dict["HTTPProxy"] as? String, let port = dict["HTTPPort"] as? Int {
+            out[kCFNetworkProxiesHTTPEnable as String] = 1
+            out[kCFNetworkProxiesHTTPProxy as String] = host
+            out[kCFNetworkProxiesHTTPPort as String] = port
+        }
+        if let httpsEnable = dict["HTTPSEnable"] as? Int, httpsEnable == 1,
+           let host = dict["HTTPSProxy"] as? String, let port = dict["HTTPSPort"] as? Int {
+            out[kCFNetworkProxiesHTTPSEnable as String] = 1
+            out[kCFNetworkProxiesHTTPSProxy as String] = host
+            out[kCFNetworkProxiesHTTPSPort as String] = port
+        }
+        if let socksEnable = dict["SOCKSEnable"] as? Int, socksEnable == 1,
+           let host = dict["SOCKSProxy"] as? String, let port = dict["SOCKSPort"] as? Int {
+            out[kCFNetworkProxiesSOCKSEnable as String] = 1
+            out[kCFNetworkProxiesSOCKSProxy as String] = host
+            out[kCFNetworkProxiesSOCKSPort as String] = port
+        }
+        return out.isEmpty ? nil : out
     }
 
     static let defaultConfigJSON = """
@@ -257,6 +295,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         guard !pollInFlight else { return }
         pollInFlight = true
         reloadConfigIfChanged()
+        // 网络环境变了（VPN 重连/代理切换）→ 立刻换会话，别等失败
+        let sig = AppDelegate.proxySignature()
+        if sig != lastProxySignature {
+            lastProxySignature = sig
+            session.invalidateAndCancel()
+            session = AppDelegate.makeSession()
+            consecutiveNetworkErrors = 0
+        }
         let group = DispatchGroup()
         for st in states {
             group.enter()
@@ -329,16 +375,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 guard let self = self else { done(); return }
                 if let error = error {
                     let ns = error as NSError
+                    // 重建会话时被取消的在飞请求（同轮其他仓库）不算网络故障
+                    if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled {
+                        done()
+                        return
+                    }
                     let isNetwork = ns.domain == NSURLErrorDomain
                         && [NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost,
                             NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost,
                             NSURLErrorTimedOut, NSURLErrorDNSLookupFailed,
-                            NSURLErrorSecureConnectionFailed].contains(ns.code)
+                            NSURLErrorSecureConnectionFailed,
+                            NSURLErrorCannotLoadFromNetwork].contains(ns.code)
                     if isNetwork {
                         st.error = "网络不可用"
                         self.consecutiveNetworkErrors += 1
-                        // 首次失败即重建会话：VPN 断开重拨后旧连接池绑在失效接口上，不重建会一直失败
-                        if self.consecutiveNetworkErrors == 1 {
+                        // 本轮首次失败即重建会话（带当前系统代理），后续失败不再打断在飞请求
+                        if self.consecutiveNetworkErrors == 1 || self.consecutiveNetworkErrors % 20 == 0 {
                             self.session.invalidateAndCancel()
                             self.session = AppDelegate.makeSession()
                         }
