@@ -1,6 +1,7 @@
 import AppKit
 import UserNotifications
 import ServiceManagement
+import Network
 
 // MARK: - 配置与数据模型
 
@@ -207,6 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var session: URLSession = AppDelegate.makeSession()
     private var consecutiveNetworkErrors = 0
     private var lastProxySignature: String = AppDelegate.proxySignature()
+    private let pathMonitor = NWPathMonitor()
+    private var lastPathSatisfied = true
 
     private static func makeSession() -> URLSession {
         let cfg = URLSessionConfiguration.ephemeral
@@ -286,6 +289,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.delegate = self
         statusItem.menu = menu
 
+        // 合盖/休眠唤醒后：socket 全断、定时器被暂停，必须换会话并立刻重试
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.handleWake()
+        }
+        // 网络路径变化（VPN 连/断、Wi-Fi 切换）——比"代理指纹"更可靠，直接触发重连
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let satisfied = path.status == .satisfied
+                if satisfied != self.lastPathSatisfied {
+                    self.lastPathSatisfied = satisfied
+                    if satisfied { self.handleWake() }
+                }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "gitlab-monitor.path"))
+
+        poll()
+    }
+
+    // 唤醒/网络恢复：换新会话（读当前代理）→ 清空错误 → 立刻轮询
+    private func handleWake() {
+        session.invalidateAndCancel()
+        session = AppDelegate.makeSession()
+        lastProxySignature = AppDelegate.proxySignature()
+        consecutiveNetworkErrors = 0
+        for st in states where st.error == "网络不可用" { st.error = nil }
+        pollInFlight = false   // 唤醒前卡住的轮询不再阻止新一轮
+        timer?.invalidate()
         poll()
     }
 
@@ -604,15 +638,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let latest = states.compactMap({ $0.fetchedAt }).max() {
             headerTitle += "（\(latest.relativeText())刷新）"
         }
-        let networkDown = states.contains(where: { $0.error == "网络不可用" })
-        if networkDown {
+        let networkErrorCount = states.filter { $0.error == "网络不可用" }.count
+        if !states.isEmpty && networkErrorCount == states.count {
             headerTitle += " · ⚠️ 网络不可用，正在重试"
+        } else if networkErrorCount > 0 {
+            headerTitle += " · ⚠️ \(networkErrorCount)/\(states.count) 个仓库取数失败"
         }
         let header = NSMenuItem(title: headerTitle, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
-        if networkDown {
-            let hint = NSMenuItem(title: "　（VPN 重连后会自动恢复，无需操作）", action: nil, keyEquivalent: "")
+        if networkErrorCount == states.count && !states.isEmpty {
+            let hint = NSMenuItem(title: "　（VPN 重连 / 合盖唤醒后会自动恢复，无需操作）", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
+        } else if networkErrorCount > 0 {
+            let hint = NSMenuItem(title: "　（其余仓库数据正常，失败的会自动重试）", action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)
         }
