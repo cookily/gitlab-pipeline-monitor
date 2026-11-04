@@ -59,7 +59,8 @@ Create `~/.config/gitlab-pipeline-monitor/config.json`（菜单里点「打开�
   "token": "<personal access token, read_api scope>",
   "intervalSeconds": 60,
   "repos": [
-    { "project": "my-group/backend", "ref": "main", "alias": "Backend" },
+    { "project": "my-group/backend", "ref": "main", "alias": "Backend", "group": "Backend services" },
+    { "project": "my-group/web", "ref": "main", "alias": "Web", "group": "Frontend" },
     { "project": "1234", "ref": "release", "alias": "Legacy Service" }
   ]
 }
@@ -74,6 +75,10 @@ Create `~/.config/gitlab-pipeline-monitor/config.json`（菜单里点「打开�
 | `repos[].ref` | Branch to watch（要监控的分支） |
 | `repos[].alias` | Display name in the menu, optional（菜单显示名，可省略） |
 | `repos[].jobs` | Optional whitelist of job names (exact match). When set, only these jobs decide the status — useful when a repo has unrelated jobs (e.g. a mobile test) that fail without affecting your deploy（可选：只看这些 job，**精确名字匹配**） |
+| `repos[].group` | Optional section title; consecutive rows with the same group get a gray section header, rows without it fall under "其他/other"（可选分组；相同 group 的连续行归入同组并显示灰色小节标题） |
+
+One repo can be listed multiple times with different `ref`s to watch several branches as
+independent rows（同一仓库可写多行、用不同 `ref` 当多个服务监控）.
 
 ### Watching a single job / 只关心某个 job
 

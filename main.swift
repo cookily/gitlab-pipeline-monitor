@@ -11,6 +11,7 @@ struct Config: Codable {
         var ref: String       // 监控的分支
         var alias: String?    // 菜单里显示的名字
         var jobs: [String]?   // 只关心这些 job（精确名字匹配）；省略=看整条流水线状态
+        var group: String?    // 菜单分组标题；相同 group 的连续行归入同组，省略归入"其他"
     }
     var gitlabUrl: String
     var token: String
@@ -262,9 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
       "token": "",
       "intervalSeconds": 60,
       "repos": [
-        { "project": "my-group/backend", "ref": "main", "alias": "Backend" },
-        { "project": "my-group/frontend", "ref": "main", "alias": "Frontend" },
-        { "project": "my-group/mobile-app", "ref": "main", "alias": "Mobile App" }
+        { "project": "my-group/backend", "ref": "main", "alias": "Backend", "group": "Backend" },
+        { "project": "my-group/frontend", "ref": "main", "alias": "Frontend", "group": "Frontend" },
+        { "project": "my-group/mobile-app", "ref": "main", "alias": "Mobile App", "group": "Frontend" }
       ]
     }
     """
@@ -667,7 +668,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             menu.addItem(warn)
         }
 
+        // 分组标题：遇到与上一行不同的 group 时插入灰色小节名（配置行序即显示顺序）
+        var lastGroup: String?? = .some(nil)  // 与"第一行无 group"区分开
         for st in states {
+            let group = st.cfg.group?.isEmpty == false ? st.cfg.group : nil
+            if lastGroup != .some(group) {
+                lastGroup = .some(group)
+                let count = states.filter { ($0.cfg.group?.isEmpty == false ? $0.cfg.group : nil) == group }.count
+                let title = "── \(group ?? "其他")（\(count)）"
+                let section = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                section.isEnabled = false
+                let attr = NSMutableAttributedString(
+                    string: title,
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ])
+                section.attributedTitle = attr
+                menu.addItem(section)
+            }
             var label = "\(statusEmoji(st.effectiveStatus)) \(st.displayName) · \(st.cfg.ref) · \(statusText(st.effectiveStatus))"
             if let timeText = pipelineTimeText(st) { label += " · \(timeText)" }
             var trigger: [String] = []
