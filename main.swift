@@ -519,11 +519,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue(token, forHTTPHeaderField: "PRIVATE-TOKEN")
-        session.dataTask(with: request) { data, _, _ in
+        session.dataTask(with: request) { [weak self] data, _, _ in
             DispatchQueue.main.async {
+                guard let self = self else { return }
                 guard let data = data,
-                      let detail = try? JSONDecoder().decode(PipelineDetail.self, from: data) else { return }
-                st.pipelineUser = detail.user?.name ?? detail.user?.username
+                      let detail = try? JSONDecoder().decode(PipelineDetail.self, from: data) else {
+                    // 请求失败（含会话重建被取消）：不占坑，下轮重试
+                    if let cur = st.pipeline?.id, cur == pipelineId { st.detailFetchedFor = nil }
+                    return
+                }
+                let name = detail.user?.name ?? detail.user?.username ?? ""
+                let trimmed = name.trimmingCharacters(in: .whitespaces)
+                // GitLab 某些时刻会返回打码名（"****"）或空值——视为无效，清标记下轮重试
+                let invalid = trimmed.isEmpty || trimmed.contains("*") || trimmed == "deleted user"
+                if invalid {
+                    if let cur = st.pipeline?.id, cur == pipelineId { st.detailFetchedFor = nil }
+                    return
+                }
+                st.pipelineUser = trimmed
             }
         }.resume()
     }
