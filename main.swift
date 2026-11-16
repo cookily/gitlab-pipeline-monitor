@@ -74,6 +74,10 @@ final class RepoState {
         if let a = cfg.alias, !a.isEmpty { return a }
         return cfg.project.split(separator: "/").last.flatMap { String($0) } ?? cfg.project
     }
+    // 仓库短名（路径最后一段），菜单行里跟在别名后便于对照 GitLab
+    var repoShortName: String {
+        cfg.project.split(separator: "/").last.flatMap { String($0) } ?? cfg.project
+    }
 }
 
 extension Date {
@@ -700,7 +704,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 section.attributedTitle = attr
                 menu.addItem(section)
             }
-            var label = "\(statusEmoji(st.effectiveStatus)) \(st.displayName) · \(st.cfg.ref) · \(statusText(st.effectiveStatus))"
+            var label = "\(statusEmoji(st.effectiveStatus)) \(st.displayName)"
+            if st.repoShortName != st.displayName { label += " · \(st.repoShortName)" }
+            label += " · \(st.cfg.ref) · \(statusText(st.effectiveStatus))"
             if let timeText = pipelineTimeText(st) { label += " · \(timeText)" }
             var trigger: [String] = []
             if let s = st.pipeline?.source { trigger.append(sourceText(s)) }
