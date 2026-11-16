@@ -766,6 +766,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         openConfig.target = self
         menu.addItem(openConfig)
 
+        // 网络卡死时的核按钮：重建一切的最快方式就是重启进程
+        let restartTitle = networkErrorCount > 0
+            ? "重启应用（修复网络）⚡️"
+            : "重启应用"
+        let restart = NSMenuItem(title: restartTitle, action: #selector(restartApp), keyEquivalent: "")
+        restart.target = self
+        menu.addItem(restart)
+
         let login = NSMenuItem(title: "开机自启", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
         login.state = isLoginItemEnabled() ? .on : .off
@@ -897,6 +905,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // 一键重启：先拉起新进程（Bundle 内可执行文件，等旧进程退出后接管），再退出自己。
+    // 新进程会用全新的会话/代理快照/内存状态启动，网络卡死时等效于人工重启。
+    @objc private func restartApp() {
+        guard let exe = Bundle.main.executableURL else { return }
+        let task = Process()
+        task.executableURL = exe
+        task.environment = ["GITLAB_MONITOR_RESTART": "1"]
+        do {
+            try task.run()
+        } catch {
+            NSLog("重启应用失败: \(error)")
+            return
+        }
+        exit(0)
     }
 
     @objc private func toggleLoginItem() {
